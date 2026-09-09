@@ -6,7 +6,10 @@
 
 или
 
-**New Space -> Docker -> Blank (остальное индивидуально) -> после перехода в Space жмёте Files** и добавляете файлы через **Contribute - Create a new File** либо **Upload files**
+**New Space -> Docker -> Blank (остальное индивидуально) -> после перехода в Space жмёте Files** и добавляете файлы через
+**Contribute - Create a new File**
+либо
+**Upload files**
 !!! СОБЛЮДАЙТЕ РЕГИСТР БУКВ В НАЗВАНИИ ФАЙЛОВ - ЭТО ВАЖНО !!!
 
 
