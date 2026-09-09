@@ -12,6 +12,9 @@
 **Upload files**
 !!! СОБЛЮДАЙТЕ РЕГИСТР БУКВ В НАЗВАНИИ ФАЙЛОВ - ЭТО ВАЖНО !!!
 
+URL обновлений для клиента получится
+https://[ВАШ_НИК_НА_HUGGINGSPACE]-[НАЗВАНИЕ_КОНТЕЙНЕРА].hf.space
+
 
 - Чтобы не светить IP нужно добавить в настройках переменную
   **Space -> Settings -> Variables -> ESET_SERVER_URL = YourIP/YourDomain**
