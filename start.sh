@@ -1,133 +1,169 @@
 #!/bin/bash
-set -u
 
-export TZ="${TZ:-Europe/Kyiv}"
+# ============================================================
+# НАСТРОЙКИ ОКРУЖЕНИЯ
+# ============================================================
+export TZ=Europe/Kyiv
 export PYTHONIOENCODING=utf-8
 export LANG=C.UTF-8
-export LC_ALL=C.UTF-8
 
-MIRROR_DIR="/app/mirror"
-LOG_FILE="$MIRROR_DIR/sync.log"
-TRIGGER_FILE="$MIRROR_DIR/manual_trigger"
-APP_DIR="/app/pynod"
+# ============================================================
+# НАСТРОЙКА ЛОГОВ И NGINX
+# ============================================================
+touch /app/mirror/sync.log
+chmod 666 /app/mirror/sync.log
+ln -sf /var/log/nginx/access.log /app/mirror/access.txt
+chmod 666 /var/log/nginx/access.log
 
-mkdir -p "$MIRROR_DIR/data" "$MIRROR_DIR/eset_upd"
-touch "$LOG_FILE"
-chmod 666 "$LOG_FILE" || true
+echo "Starting Nginx..."
+service nginx start
 
-log() {
-    echo "$*" >> "$LOG_FILE"
+echo "Starting fcgiwrap..."
+service fcgiwrap start
+
+# ============================================================
+# ФОНОВАЯ РОТАЦИЯ ЛОГОВ NGINX (ОСТАВЛЯЕМ 3 ДНЯ)
+# ============================================================
+rotate_nginx_logs() {
+    LOG_DIR="/var/log/nginx"
+    while true; do
+        sleep 86400 # Спим 24 часа
+
+        DATE=$(date +%Y-%m-%d)
+        
+        # Переименовываем текущие файлы
+        [ -f "$LOG_DIR/access.log" ] && mv "$LOG_DIR/access.log" "$LOG_DIR/access.log.$DATE"
+        [ -f "$LOG_DIR/error.log" ] && mv "$LOG_DIR/error.log" "$LOG_DIR/error.log.$DATE"
+
+        # Даем команду Nginx переоткрыть дескрипторы логов
+        nginx -s reopen
+
+        # Удаляем всё, что старше 3 дней
+        find "$LOG_DIR" -type f -name "*.log.*" -mtime +3 -exec rm -f {} \;
+    done
 }
+# Запускаем в фоне!
+rotate_nginx_logs &
 
-# --- webhook для ручного запуска ---
-cat > /app/webhook.py <<'PY'
+# ============================================================
+# WEBHOOK
+# ============================================================
+cat <<EOF > /app/webhook.py
 from http.server import HTTPServer, BaseHTTPRequestHandler
-
-TRIGGER = "/app/mirror/manual_trigger"
-
 class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
-        with open(TRIGGER, "w", encoding="utf-8") as f:
-            f.write("1")
-
+        with open("/app/mirror/manual_trigger", "w") as f: f.write("1")
         self.send_response(200)
-        self.send_header("Content-Type", "text/plain; charset=utf-8")
+        self.send_header('Content-type', 'text/plain')
         self.end_headers()
-        self.wfile.write(b"Manual update requested. Check /synclog\n")
-
-    def log_message(self, fmt, *args):
-        pass
-
-HTTPServer(("127.0.0.1", 9999), Handler).serve_forever()
-PY
-
+        self.wfile.write(b"MANUAL UPDATE STARTED. Check sync.log")
+HTTPServer(('127.0.0.1', 9999), Handler).serve_forever()
+EOF
 python3 /app/webhook.py &
-WEBHOOK_PID=$!
 
-cleanup() {
-    kill "$WEBHOOK_PID" 2>/dev/null || true
-    nginx -s quit 2>/dev/null || true
-    exit 0
-}
-
-trap cleanup SIGTERM SIGINT
-
-# --- очистка логов: оставить 6 последних запусков ---
-cat > /app/filter_logs.py <<'PY'
-import os
+# ============================================================
+# СКРИПТ ОЧИСТКИ ЛОГОВ (6 ЛЮБЫХ ПОСЛЕДНИХ ЗАПУСКОВ)
+# ============================================================
+cat << 'EOF' > /app/filter_logs.py
 import re
+import sys
+import os
 
-path = "/app/mirror/sync.log"
+log_path = '/app/mirror/sync.log'
 
-if not os.path.exists(path):
-    raise SystemExit(0)
+if not os.path.exists(log_path):
+    sys.exit(0)
 
-with open(path, "r", encoding="utf-8", errors="replace") as f:
+with open(log_path, 'r', encoding='utf-8') as f:
     content = f.read()
 
-parts = re.split(r"(=== PREPARING UPDATE \[.*?===)", content)
-blocks = []
+# Разделяем лог по стартовому маркеру
+parts = re.split(r'(=== PREPARING UPDATE \[.*?===)', content)
 
+# Собираем блоки
+blocks = []
 for i in range(1, len(parts), 2):
     header = parts[i]
-    body = parts[i + 1] if i + 1 < len(parts) else ""
+    body = parts[i+1] if i+1 < len(parts) else ""
     blocks.append(header + body)
 
-with open(path, "w", encoding="utf-8") as f:
-    f.write(parts[0] + "".join(blocks[-6:]))
-PY
+# Оставляем только 6 самых свежих блоков с конца
+keep_blocks = blocks[-6:]
 
-SCRIPT_PATH=$(find "$APP_DIR" -name "update.py" -print -quit)
+# Собираем лог обратно (шапка + оставшиеся блоки)
+filtered_log = parts[0] + "".join(keep_blocks)
 
+with open(log_path, 'w', encoding='utf-8') as f:
+    f.write(filtered_log)
+EOF
+
+# ============================================================
+# ПОИСК СКРИПТА
+# ============================================================
+SCRIPT_PATH=$(find /app -name "update.py" -print -quit)
 if [ -z "$SCRIPT_PATH" ]; then
-    log "CRITICAL: update.py not found!"
-else
-    cd "$(dirname "$SCRIPT_PATH")"
+    echo "CRITICAL: update.py not found!" >> /app/mirror/sync.log
+    sleep 21600
+    exit 1
 fi
+WORK_DIR=$(dirname "$SCRIPT_PATH")
+cd "$WORK_DIR"
 
-# nginx в foreground-процессе, чтобы Space корректно отслеживал контейнер
-nginx -g 'daemon off;' &
-NGINX_PID=$!
-
-rm -f "$TRIGGER_FILE"
-
+# ============================================================
+# ФУНКЦИЯ ВРЕМЕНИ
+# ============================================================
 get_datetime() {
     date '+%Y-%m-%d %H:%M:%S %Z'
 }
 
+# Подчищаем хвосты при рестарте
+rm -f /app/mirror/manual_trigger
+
+# ============================================================
+# ОСНОВНОЙ ЦИКЛ
+# ============================================================
 RUN_MODE="AUTO"
 
 while true; do
-    log "=== PREPARING UPDATE [$RUN_MODE] $(get_datetime) ==="
 
-    CLEAN_URL=$(echo "${ESET_SERVER_URL:-}" | xargs)
-    CLEAN_RESERVE=$(echo "${ESET_SERVER_URL_RESERVE:-}" | xargs)
+    echo "=== PREPARING UPDATE [$RUN_MODE] $(get_datetime) ===" >> /app/mirror/sync.log
 
-    if [ -z "$CLEAN_URL" ]; then
-        log "[ERROR] ESET_SERVER_URL is empty. Waiting 6 hours or manual trigger."
-        FINAL_MIRROR=""
-        LOG_NAME="NOT CONFIGURED"
+    # --------------------------------------------------------
+    # ОЧИСТКА ПЕРЕМЕННЫХ
+    # --------------------------------------------------------
+    CLEAN_URL=$(echo "$ESET_SERVER_URL" | xargs)
+    CLEAN_RESERVE=$(echo "$ESET_SERVER_URL_RESERVE" | xargs)
+
+    # --------------------------------------------------------
+    # ПРОВЕРКА HTTP КОДА
+    # --------------------------------------------------------
+    echo "[CHECK] Testing connection to: ESET_SERVER_URL" >> /app/mirror/sync.log
+    
+    HTTP_CODE=$(curl -o /dev/null -s -w "%{http_code}" -m 10 -L "$CLEAN_URL" || echo "000")
+    if [ -z "$HTTP_CODE" ]; then HTTP_CODE="000"; fi
+    
+    echo "[CHECK] Response Code: $HTTP_CODE" >> /app/mirror/sync.log
+    
+    if [ "$HTTP_CODE" != "000" ]; then
+        echo "[CHECK] Primary is ONLINE." >> /app/mirror/sync.log
+        FINAL_MIRROR="$CLEAN_URL"
+        LOG_NAME="ESET_SERVER_URL"
     else
-        HTTP_CODE=$(curl -o /dev/null -s -w "%{http_code}" -m 10 -L "$CLEAN_URL" || true)
-        HTTP_CODE=${HTTP_CODE:-000}
-
-        if [ "$HTTP_CODE" != "000" ]; then
+        echo "[CHECK] Primary DOWN (Code 000). Switching to ESET_SERVER_URL_RESERVE..." >> /app/mirror/sync.log
+        if [ -z "$CLEAN_RESERVE" ]; then
+            echo "[WARNING] Reserve empty! Forced Primary." >> /app/mirror/sync.log
             FINAL_MIRROR="$CLEAN_URL"
-            LOG_NAME="ESET_SERVER_URL"
-            log "[CHECK] Primary ONLINE. HTTP $HTTP_CODE"
-        elif [ -n "$CLEAN_RESERVE" ]; then
+            LOG_NAME="ESET_SERVER_URL (Forced)"
+        else
             FINAL_MIRROR="$CLEAN_RESERVE"
             LOG_NAME="ESET_SERVER_URL_RESERVE"
-            log "[CHECK] Primary unavailable. Switching to reserve."
-        else
-            FINAL_MIRROR="$CLEAN_URL"
-            LOG_NAME="ESET_SERVER_URL (forced)"
-            log "[WARNING] Primary unavailable and reserve is empty."
         fi
     fi
 
-    if [ -n "${FINAL_MIRROR:-}" ] && [ -n "${SCRIPT_PATH:-}" ]; then
-        cat > nod32ms.conf <<EOF
+    # --------------------------------------------------------
+    # ГЕНЕРАЦИЯ КОНФИГА
+    # --------------------------------------------------------
+cat <<EOF > nod32ms.conf
 [PATCH]
 protoscan_v3_patch = 1
 
@@ -156,43 +192,55 @@ mirror = $FINAL_MIRROR
 mirror_timeout = 20
 mirror_connect_retries = 3
 max_workers = 4
-mirror_user = ${ESET_SERVER_USER:-}
-mirror_password = ${ESET_SERVER_PASS:-}
+
+# === НАСТРОЙКИ ЛОГИНА И ПАРОЛЯ ===
+# mirror_user = $ESET_SERVER_USER
+mirror_user = 
+
+# mirror_password = $ESET_SERVER_PASS
+mirror_password = 
 
 [ESET]
 prefix = data
+#versionep12 = 1
 versionep13 = 1
 EOF
 
-        log "=== STARTING SYNC from: $LOG_NAME ==="
+    # --------------------------------------------------------
+    # ЗАПУСК ОБНОВЛЕНИЯ
+    # --------------------------------------------------------
+    echo "=== STARTING SYNC from: $LOG_NAME ===" >> /app/mirror/sync.log
 
-        python -u update.py 2>&1 \
-            | sed -u -r 's/\x1B\[[0-9;]*[[:alpha:]]//g' \
-            | sed -u -r 's/^\s+//' \
-            | sed -u '/^$/d' \
-            | sed -u -e 's/.*Общий прогресс.*/\n==================================================\n= & =\n==================================================/g' \
-            | tee -a "$LOG_FILE"
+    python -u update.py 2>&1 |
+    sed -u -r 's/\x1B[[0-9;]*[[:alpha:]]//g' |
+    sed -u "s|$FINAL_MIRROR|ESET_SERVER_URL|g" |
+    sed -u -r 's/^\s+//' |
+    sed -u '/^$/d' |
+    sed -u -e 's/.*Общий прогресс.*/\n==================================================\n= & =\n==================================================/g' |
+    tee -a /app/mirror/sync.log
+    
+    next_time=$(date -d '6 hours' '+%Y-%m-%d %H:%M:%S %Z')
+    
+    echo "=== FINISHED UPDATE [$RUN_MODE]. Next auto-run: $next_time ===" >> /app/mirror/sync.log
+    printf "\n\n\n" >> /app/mirror/sync.log
+    
+    # --- ОЧИСТКА ЛОГА ---
+    python3 /app/filter_logs.py
+    # --------------------
 
-        log "=== FINISHED UPDATE [$RUN_MODE] ==="
-        python3 /app/filter_logs.py
-    fi
+    # Сбрасываем триггер, который мог прилететь во время обновления
+    rm -f /app/mirror/manual_trigger
 
     RUN_MODE="AUTO"
     SECONDS_WAITED=0
 
-    while [ "$SECONDS_WAITED" -lt 21600 ]; do
-        if [ -f "$TRIGGER_FILE" ]; then
-            rm -f "$TRIGGER_FILE"
+    while [ $SECONDS_WAITED -lt 21600 ]; do
+        if [ -f /app/mirror/manual_trigger ]; then
+            rm /app/mirror/manual_trigger
             RUN_MODE="MANUAL"
-            log "=== MANUAL UPDATE REQUESTED ==="
+            echo "=== MANUAL UPDATE REQUESTED ===" >> /app/mirror/sync.log
             break
         fi
-
-        if ! kill -0 "$NGINX_PID" 2>/dev/null; then
-            log "CRITICAL: nginx stopped."
-            cleanup
-        fi
-
         sleep 5
         SECONDS_WAITED=$((SECONDS_WAITED + 5))
     done

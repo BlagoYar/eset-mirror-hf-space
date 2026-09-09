@@ -1,5 +1,5 @@
-requests
-tqdm
 fastapi
 uvicorn[standard]
+requests
 beautifulsoup4
+tqdm
