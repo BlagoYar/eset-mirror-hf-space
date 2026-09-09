@@ -1,23 +1,20 @@
----
-title: ESET Mirror
-sdk: docker
-app_port: 7860
----
+Создание:
+Регистрируемся
+Переходим на создание Space
+или
+New Space -> Docker -> Blank (остальное индивидуально) -> после перехода в Space жмёте Files и добавляете файлы ниже через Contribute - Create a new File либо Upload files
+!!! СОБЛЮДАЙТЕ РЕГИСТР БУКВ В НАЗВАНИИ ФАЙЛОВ - ЭТО ВАЖНО !!!
 
-# ESET Mirror
+Чтобы не светить IP нужно добавить в настройках переменную
+Space -> Settings -> Variables -> ESET_SERVER_URL = YourIP/YourDomain
+По той же схеме, если нужно имя юзера и парол ESET_SERVER_USER и ESET_SERVER_PASS. Запароленый сервер не проверял, возможно нужно будет подкорректировать.
+Путь к логам в браузере - https://yourdomen.com/synclog
+Потому что в HuggingFace там глюковато с логом "общаться".
+Чтобы не хламилось, сделал только 6 (общих и авто, и ручных) последних логов на вэб-странице Auto Update и Manual.
+Обновление вручную (триггер) - https://yourdomen.com/sync
+Автообновление каждые 6 часов. При ручном обновлении периодичность меняется относительно его.
+Часовой пояс для логов +2 (Europe/Kyiv)
+В логах отметил где авто, а где ручное обновление
+Выделение общего прогресса строками из '='
 
-Hugging Face Docker Space.
-
-## Variables
-
-В Settings → Variables добавьте:
-
-- ESET_SERVER_URL
-- ESET_SERVER_URL_RESERVE (если нужен резервный сервер)
-- ESET_SERVER_USER (если требуется)
-- ESET_SERVER_PASS (если требуется)
-
-## Доступ
-
-- /synclog — лог синхронизации
-- /sync — ручной запуск обновления
+Файлы для Space (для ESET v13; если нужна другая, указать в start.sh --> раздел [ESET])
