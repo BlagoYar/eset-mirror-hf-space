@@ -1,0 +1,5 @@
+requests
+tqdm
+fastapi
+uvicorn[standard]
+beautifulsoup4

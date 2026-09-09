@@ -1,0 +1,7 @@
+__pycache__/
+*.py[cod]
+.env
+mirror/data/
+mirror/eset_upd/
+mirror/*.log
+mirror/access.txt
